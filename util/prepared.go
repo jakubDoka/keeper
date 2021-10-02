@@ -17,7 +17,7 @@ func NewPrepared() *Prepared {
 	return &Prepared{commands: make(map[string]*sql.Stmt)}
 }
 
-func (p *Prepared) LoadFile(db *sql.DB, id, content string) error {
+func (p *Prepared) Prepare(db *sql.DB, id, content string) error {
 	return p.LoadFileWithCUstomSyntax(db, id, content, "--+", "+--")
 }
 

@@ -10,40 +10,41 @@ import (
 )
 
 type Connection struct {
-	Tcp                *net.TCPConn
-	Udp                *UDPListener
-	UdpAddr            net.Addr
-	UdpBuff            *UDPPacketBuffer
-	disconnected       int32
+	Tcp *net.TCPConn
+	Udp *UDPListener
+
+	UdpAddr net.Addr
+	UdpBuff *UDPPacketBuffer
+
+	cipher kcrypto.Cipher
+
+	disconnected int32
+
 	queuedPackets      []ClientPacket
 	queuedPacketsMutex sync.Mutex
 }
 
-func NewConnection(tcp *net.TCPConn, udp *UDPListener, udpAddr net.Addr) *Connection {
+func NewConnection(tcp *net.TCPConn, udp *UDPListener, udpAddr net.Addr, cipher kcrypto.Cipher) *Connection {
 	return &Connection{
 		Tcp:     tcp,
 		Udp:     udp,
 		UdpAddr: udpAddr,
 		UdpBuff: udp.AddConnection(udpAddr.String()),
+		cipher:  cipher,
 	}
 }
 
 // run this on thread
-func (c *Connection) CollectPackets(state *state.State, cipher *kcrypto.Cipher) {
+func (c *Connection) CollectPackets(state *state.State) {
 	for {
-		data, disconnected, err := ReadPacket(c.Tcp)
-		if disconnected {
-			state.Debug("Connection %s disconnected.", c.Tcp.RemoteAddr())
+		data, err := ReadPacket(c.Tcp)
+		if err != nil {
+			state.Debug("Connection %s disconnected due to error: %s", c.Tcp.RemoteAddr(), err)
 			c.markDisconnected()
 			return
 		}
 
-		if err != nil {
-			state.Debug("Error when reading connection: %s", err)
-			continue
-		}
-
-		packet, err := DecodeEncryptedClientPacket(state, data, false)
+		packet, err := DecodeEncryptedClientPacket(state, data, false, &c.cipher)
 		if err != nil {
 			state.Debug("Error when decoding packet from %s: %s", c.Tcp.RemoteAddr(), err)
 			continue
@@ -59,7 +60,7 @@ func (c *Connection) HarvestPackets(state *state.State, buffer *[]ClientPacket, 
 	c.UdpBuff.HarvestPackets(helper)
 
 	for _, data := range *helper {
-		packet, err := DecodeEncryptedClientPacket(state, data, true)
+		packet, err := DecodeEncryptedClientPacket(state, data, true, &c.cipher)
 		if err != nil {
 			state.Debug("Error when decoding packet from %s: %s", c.Tcp.RemoteAddr(), err)
 			continue
@@ -73,20 +74,20 @@ func (c *Connection) HarvestPackets(state *state.State, buffer *[]ClientPacket, 
 	c.queuedPacketsMutex.Unlock()
 }
 
-func (c *Connection) WritePacket(packetCode OpCode, packetData []byte, udp bool, cipher *kcrypto.Cipher) error {
+func (c *Connection) WritePacket(packetCode OpCode, packetData []byte, udp bool) error {
 	if udp {
-		return c.WritePacketUDP(packetCode, packetData, cipher)
+		return c.WritePacketUDP(packetCode, packetData)
 	}
-	return c.WritePacketTCP(packetCode, packetData, cipher)
+	return c.WritePacketTCP(packetCode, packetData)
 }
 
-func (c *Connection) WritePacketTCP(packetCode OpCode, packetData []byte, cipher *kcrypto.Cipher) error {
-	_, err := c.Tcp.Write(EncodePacketTCP(packetCode, packetData, cipher))
+func (c *Connection) WritePacketTCP(packetCode OpCode, packetData []byte) error {
+	_, err := c.Tcp.Write(EncodePacketTCP(packetCode, packetData, &c.cipher))
 	return err
 }
 
-func (c *Connection) WritePacketUDP(packetCode OpCode, packetData []byte, cipher *kcrypto.Cipher) error {
-	_, err := c.Udp.conn.WriteTo(EncodePacketTCP(packetCode, packetData, cipher), c.UdpAddr)
+func (c *Connection) WritePacketUDP(packetCode OpCode, packetData []byte) error {
+	_, err := c.Udp.conn.WriteTo(EncodePacketUDP(packetCode, packetData, &c.cipher), c.UdpAddr)
 	return err
 }
 
@@ -96,6 +97,10 @@ func (c *Connection) markDisconnected() {
 
 func (c *Connection) Disconnected() bool {
 	return atomic.LoadInt32(&c.disconnected) == 1
+}
+
+func (c *Connection) Cipher() *kcrypto.Cipher {
+	return &c.cipher
 }
 
 func (c *Connection) Close() {

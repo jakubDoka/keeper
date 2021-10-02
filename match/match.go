@@ -2,8 +2,10 @@ package match
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/jakubDoka/keeper/index"
 	"github.com/jakubDoka/keeper/knet"
 	"github.com/jakubDoka/keeper/state"
 	"github.com/jakubDoka/keeper/util/uuid"
@@ -15,32 +17,35 @@ import (
 type Match struct {
 	Core
 
-	Id      uuid.UUID
-	Creator *state.User
+	id, creator uuid.UUID
+	state       *state.State
+	tag         []index.Field
+	manager     *Manager
 
-	state *state.State
-
-	users    map[uuid.UUID]User
-	idBuffer []uuid.UUID
+	users      map[uuid.UUID]User
+	idBuffer   []uuid.UUID
+	userAmount uint32
 
 	queuedUsers, tempQueuedUsers []User
 	queuedUsersMutex             sync.Mutex
 
-	tickRate int
-	ticker   *time.Ticker
+	tickRate   int
+	ticker     *time.Ticker
+	terminated bool
 }
 
 // New constructs a new match. meta is passed to core.OnInit method.
-func New(state *state.State, core Core, creator *state.User, id uuid.UUID, meta []byte) (*Match, error) {
+func New(state *state.State, manager *Manager, core Core, creator *state.User, id uuid.UUID, meta []byte) (*Match, error) {
 	if id == uuid.Nil {
 		id = uuid.New()
 	}
 
 	m := &Match{
-		Id:       id,
+		id:       id,
 		Core:     core,
-		Creator:  creator,
+		creator:  creator.ID(),
 		state:    state,
+		manager:  manager,
 		users:    make(map[uuid.UUID]User),
 		tickRate: 30,
 		ticker:   time.NewTicker(time.Second / 30),
@@ -49,6 +54,15 @@ func New(state *state.State, core Core, creator *state.User, id uuid.UUID, meta 
 	err := core.OnInit(m.State(), meta)
 
 	return m, err
+}
+
+func (m *Match) Info() []byte {
+	inf, err := m.OnInfoRequest(m.State())
+	if err != nil {
+		m.state.Error("Error while getting match info: %s", err)
+		return nil
+	}
+	return inf
 }
 
 // ConnectUser is thread safe and you can call it from anywhere. Match will not handle
@@ -67,7 +81,8 @@ func (m *Match) Run() {
 
 	state := m.State()
 
-	for {
+	for !m.terminated {
+		userAmount := uint32(len(m.users))
 		// handle disconnected and custom requests
 		for id, user := range m.users {
 			if user.Disconnected() {
@@ -96,19 +111,20 @@ func (m *Match) Run() {
 		m.queuedUsers, m.tempQueuedUsers = m.tempQueuedUsers[:0], m.queuedUsers
 		m.queuedUsersMutex.Unlock()
 		for _, user := range m.tempQueuedUsers {
-			m.users[user.User.ID()] = user
 			meta, err, fatalErr := m.OnConnection(state, user, user.meta)
-			user.meta = nil
-			if err != nil {
-				user.WritePacketTCP(knet.OCMatchJoinFail, []byte(err.Error()), nil)
-			} else {
-				user.WritePacketTCP(knet.OCMatchJoinSuccess, meta, user.Cipher())
-			}
 
 			if m.handleErr(fatalErr) {
 				return
 			}
 
+			user.meta = nil
+
+			if err != nil {
+				user.WritePacketTCP(knet.OCMatchJoinFail, []byte(err.Error()))
+			} else {
+				user.WritePacketTCP(knet.OCMatchJoinSuccess, meta)
+				m.users[user.User.ID()] = user
+			}
 		}
 
 		// handle tick
@@ -116,8 +132,20 @@ func (m *Match) Run() {
 			return
 		}
 
+		newUserAmount := uint32(len(m.users))
+		if newUserAmount != userAmount {
+			atomic.StoreUint32(&m.userAmount, newUserAmount)
+		}
+
 		<-m.ticker.C
 	}
+
+	m.OnEnd(state)
+	state.Debug("Match %s terminated", m.id)
+}
+
+func (m *Match) UserAmount() uint32 {
+	return atomic.LoadUint32(&m.userAmount)
 }
 
 // ResendPacket just passes the packet as user intended to send it.
@@ -134,12 +162,12 @@ func (m *Match) SendPacket(targets *[]uuid.UUID, opCode knet.OpCode, data []byte
 		for _, target := range *targets {
 			user, ok := m.users[target]
 			if ok {
-				user.WritePacket(opCode, data, udp, user.Cipher())
+				user.WritePacket(opCode, data, udp)
 			}
 		}
 	} else {
 		for _, user := range m.users {
-			user.WritePacket(opCode, data, udp, user.Cipher())
+			user.WritePacket(opCode, data, udp)
 		}
 	}
 }
@@ -157,6 +185,26 @@ func (m *Match) SetTickRate(rate int) {
 	m.ticker.Reset(duration)
 }
 
+func (m *Match) SetTag(value []byte) (int, error) {
+	var parser index.Parser
+	tag, i, err := parser.Parse(value)
+	if err != nil {
+		return i, err
+	}
+	for i := range tag {
+		tag[i].Value = &m.id
+	}
+	m.manager.index.Remove(m.tag...)
+	m.tag = tag
+	m.manager.index.Insert(m.tag...)
+	return 0, nil
+}
+
+func (m *Match) GetUser(id uuid.UUID) (User, bool) {
+	user, ok := m.users[id]
+	return user, ok
+}
+
 func (m *Match) handleErr(err error) bool {
 	if err == nil {
 		return false
@@ -169,9 +217,27 @@ func (m *Match) handleErr(err error) bool {
 	return res
 }
 
+func (m *Match) Terminate() {
+	m.terminated = true
+}
+
 // State return match state.
 func (m *Match) State() State {
 	return State{m.state, m}
+}
+
+func (m *Match) ID() uuid.UUID {
+	return m.id
+}
+
+func (m *Match) Creator() uuid.UUID {
+	return m.creator
+}
+
+func (m *Match) Only(target uuid.UUID) *[]uuid.UUID {
+	m.idBuffer = m.idBuffer[:0]
+	m.idBuffer = append(m.idBuffer, target)
+	return &m.idBuffer
 }
 
 // All should be passed to SendPacket when sending to all players.
@@ -203,6 +269,10 @@ type State struct {
 	*Match
 }
 
+func (s State) UserAmount() int {
+	return len(s.users)
+}
+
 // Request glues packet and sender together
 type Request struct {
 	*knet.Connection
@@ -217,6 +287,7 @@ type Core interface {
 	OnTick(state State) error
 	OnError(state State, err error) bool
 	OnEnd(state State)
+	OnInfoRequest(state State) ([]byte, error)
 }
 
 type CoreBase struct{}
@@ -230,3 +301,4 @@ func (*CoreBase) OnCustomRequest(state State, req []Request) error { return nil 
 func (*CoreBase) OnTick(state State) error                         { return nil }
 func (*CoreBase) OnError(state State, err error) bool              { return true }
 func (*CoreBase) OnEnd(state State)                                {}
+func (*CoreBase) OnInfoRequest(state State) ([]byte, error)        { return nil, nil }

@@ -34,7 +34,7 @@ You can get a different error if you don't have Postgres properly installed. You
 
 ```go
     // import "github.com/jakubDoka/keeper/cfg"
-    err := cfg.GenerateConfig()
+    err := kcfg.GenerateConfig()
     if err != nil {
         panic(err)
     }

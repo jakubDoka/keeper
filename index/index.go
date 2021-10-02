@@ -5,10 +5,6 @@ import (
 	"sync"
 )
 
-type ResultBuffer interface {
-	Add(interface{})
-}
-
 type IndexCategory interface {
 	Insert(field Field)
 	Remove(field Field)
@@ -95,7 +91,7 @@ func (i *IntIndexCategory) Insert(field Field) {
 	}
 
 	idx, _ := i.BinSearch(field.Int1)
-	i.capsules = append(i.capsules, IntCapsule{})
+	i.capsules = append(i.capsules, IntCapsule{value: field.Int1})
 	copy(i.capsules[idx+1:], i.capsules[idx:])
 
 	i.capsules[idx].data = field.Value
@@ -118,15 +114,8 @@ func (i *IntIndexCategory) Search(field Field, buffer ResultBuffer) {
 			buffer.Add(i.capsules[idx].data)
 		}
 	case FTRange:
-		start, okStart := i.BinSearch(field.Int1)
-		end, okEnd := i.BinSearch(field.Int2)
-		if !okStart {
-			start += 1
-		}
-		if okEnd {
-			end += 1
-		}
-
+		start, _ := i.BinSearch(field.Int1)
+		end, _ := i.BinSearch(field.Int2)
 		for j := start; j < end; j++ {
 			buffer.Add(i.capsules[j].data)
 		}
@@ -170,7 +159,7 @@ func (i *IntIndexCategory) BinSearch(value int32) (int, bool) {
 		}
 	}
 
-	return low, i.capsules[low].value == value
+	return low, low < len(i.capsules) && i.capsules[low].value == value
 }
 
 type StringCapsule struct {
@@ -200,7 +189,7 @@ func (i *StringIndexCategory) Insert(field Field) {
 	}
 
 	idx, _ := i.BinSearch(field.String)
-	i.capsules = append(i.capsules, StringCapsule{})
+	i.capsules = append(i.capsules, StringCapsule{value: field.String})
 	copy(i.capsules[idx+1:], i.capsules[idx:])
 
 	i.capsules[idx].data = field.Value
@@ -268,5 +257,9 @@ func (i *StringIndexCategory) BinSearch(value string) (int, bool) {
 		}
 	}
 
-	return low, i.capsules[low].value == value
+	return low, low < len(i.capsules) && i.capsules[low].value == value
+}
+
+type ResultBuffer interface {
+	Add(interface{})
 }

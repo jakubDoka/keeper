@@ -9,7 +9,10 @@ import (
 	"github.com/jakubDoka/keeper/util/uuid"
 )
 
-var ErrInvalidPadding = errors.New("invalid padding")
+var (
+	ErrInvalidPadding = errors.New("invalid padding")
+	ErrPacketLost     = errors.New("packet lost")
+)
 
 const KeySize = 32
 
@@ -18,11 +21,8 @@ var (
 	temp Key
 )
 
-// Key fixed array of bytes representing both aes key and
-// iv stored respectively.
-type Key [KeySize + aes.BlockSize]byte
+type Key [KeySize + aes.BlockSize*2]byte
 
-// NewKey creates random key using crypto/rand.Reader.
 func NewKey() Key {
 	// prevent allocation due to escape analysis
 	m.Lock()
@@ -33,24 +33,26 @@ func NewKey() Key {
 	if err != nil {
 		panic(err)
 	}
-	if n != KeySize+aes.BlockSize {
+	if n != len(res) {
 		panic("unable to generate random key")
 	}
 
 	return res
 }
 
-func (k Key) IV() uuid.UUID {
-	var iv uuid.UUID
-	copy(iv[:], k[KeySize:])
-	return iv
+func (k Key) IV() (udp, tcp uuid.UUID) {
+	copy(udp[:], k[KeySize:])
+	copy(tcp[:], k[KeySize+aes.BlockSize:])
+	return
 }
 
 // Cipher is small abstraction over cipher package to make encryption
 // and decryption nicer. It can be used concurrently. Uses aes.
 type Cipher struct {
-	key      Key
-	enc, dec *CBC
+	key           Key
+	udp           CBCUDP
+	tcp           CBCTCP
+	isInitialized bool
 }
 
 // NewCipher creates new chipher with random key.
@@ -65,55 +67,65 @@ func NewCipherWithKey(key Key) Cipher {
 		panic(err)
 	}
 
-	iv := key.IV()
+	tcp, udp := key.IV()
 
-	dec := NewCBC(block, iv)
-	enc := NewCBC(block, iv)
-
-	return Cipher{
-		key: key,
-		dec: dec,
-		enc: enc,
-	}
+	return Cipher{key, NewCBCUDP(block, tcp), NewCBCTCP(block, udp), true}
 }
 
-// Encrypt overwrites passed bytes and also appends the padding.
-func (c *Cipher) Encrypt(plaintext []byte, refresh bool) []byte {
-	// handle padding
-	padding := aes.BlockSize - len(plaintext)&(aes.BlockSize-1)
-	var pad [16]byte
-	for i := 0; i < padding; i++ {
-		pad[i] = byte(padding)
-	}
-	plaintext = append(plaintext, pad[:padding]...)
+func (c *Cipher) EncryptTCP(plaintext []byte) []byte {
+	plaintext = AddPadding(plaintext)
 
-	c.enc.Encrypt(plaintext, plaintext)
-	if refresh {
-		c.dec.RefreshIV()
-	}
+	c.tcp.Encrypt(plaintext, plaintext)
 
 	return plaintext
 }
 
-// Decrypt expects encoded message with padding. Error is returned only if
-// padding has invalid format. That means at least last byte is holding number
-// in range 1-16.
-func (c *Cipher) Decrypt(ciphertext []byte, refresh bool) ([]byte, error) {
-	c.dec.Decrypt(ciphertext, ciphertext)
-	if refresh {
-		c.dec.RefreshIV()
+func (c *Cipher) DecryptTCP(ciphertext []byte) ([]byte, error) {
+	c.tcp.Decrypt(ciphertext, ciphertext)
+
+	return RemovePadding(ciphertext)
+}
+
+func (c *Cipher) EncryptUDP(plaintext []byte) ([]byte, uint32) {
+	plaintext = AddPadding(plaintext)
+
+	gen := c.udp.Encrypt(plaintext, plaintext)
+
+	return plaintext, gen
+}
+
+func (c *Cipher) DecryptUDP(ciphertext []byte, gen uint32) ([]byte, error) {
+	ok := c.udp.Decrypt(ciphertext, ciphertext, gen)
+	if !ok {
+		return nil, ErrPacketLost
 	}
 
-	// handle padding
-	padding := int(ciphertext[len(ciphertext)-1])
-	if padding > aes.BlockSize {
-		return nil, ErrInvalidPadding
-	}
-
-	return ciphertext[:len(ciphertext)-padding], nil
+	return RemovePadding(ciphertext)
 }
 
 // Key returns cipher key.
 func (c *Cipher) Key() Key {
 	return c.key
+}
+
+func (c *Cipher) IsNil() bool {
+	return !c.isInitialized
+}
+
+func AddPadding(plaintext []byte) []byte {
+	padding := aes.BlockSize - len(plaintext)&(aes.BlockSize-1)
+	var pad [16]byte
+	for i := 0; i < padding; i++ {
+		pad[i] = byte(padding)
+	}
+	return append(plaintext, pad[:padding]...)
+}
+
+func RemovePadding(plaintext []byte) ([]byte, error) {
+	padding := int(plaintext[len(plaintext)-1])
+	if padding > aes.BlockSize {
+		return nil, ErrInvalidPadding
+	}
+
+	return plaintext[:len(plaintext)-padding], nil
 }

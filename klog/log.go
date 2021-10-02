@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jakubDoka/keeper/cfg"
+	"github.com/jakubDoka/keeper/kcfg"
 )
 
 type Level int
@@ -42,7 +42,7 @@ type Logger struct {
 	finished   bool
 }
 
-func (l *Logger) ApplyConfig(cfg cfg.Log) {
+func (l *Logger) ApplyConfig(cfg kcfg.Log) {
 	l.check()
 
 	slice := cfg.StacktraceDepth.Slice()

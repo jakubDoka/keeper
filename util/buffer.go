@@ -80,6 +80,17 @@ func (r *Reader) Uint32() (uint32, bool) {
 	return result, true
 }
 
+// Uint64 reads Uint64 from buffer with Big endian encoding. returns false if failed.
+func (r *Reader) Uint64() (uint64, bool) {
+	nextoffset := r.offset + 8
+	if nextoffset > len(r.buf) {
+		return 0, false
+	}
+	result := binary.BigEndian.Uint64(r.buf[r.offset:])
+	r.offset = nextoffset
+	return result, true
+}
+
 // Rest returns rest of the buffer.
 func (r *Reader) Rest() []byte {
 	return r.buf[r.offset:]
@@ -99,6 +110,14 @@ func NewWriter(cap int) Writer {
 func (w *Writer) Uint32(value uint32) *Writer {
 	var data [4]byte
 	binary.BigEndian.PutUint32(data[:], value)
+	w.buf = append(w.buf, data[:]...)
+	return w
+}
+
+// Uint64 writes uint64 to buffer in Big endian encoding.
+func (w *Writer) Uint64(value uint64) *Writer {
+	var data [8]byte
+	binary.BigEndian.PutUint64(data[:], value)
 	w.buf = append(w.buf, data[:]...)
 	return w
 }
@@ -155,6 +174,12 @@ func (c *Calculator) Pad(chunk int) *Calculator {
 // Uint32 increments counter by size of uint32 in bytes.
 func (c *Calculator) Uint32() *Calculator {
 	c.offset += 4
+	return c
+}
+
+// Uint64 increments counter by size of uint32 in bytes.
+func (c *Calculator) Uint64() *Calculator {
+	c.offset += 8
 	return c
 }
 

@@ -2,9 +2,10 @@ package match
 
 import (
 	"errors"
+	"fmt"
 	"sync"
-	"time"
 
+	"github.com/jakubDoka/keeper/index"
 	"github.com/jakubDoka/keeper/knet"
 	"github.com/jakubDoka/keeper/state"
 	"github.com/jakubDoka/keeper/util"
@@ -17,7 +18,9 @@ var (
 )
 
 type Manager struct {
-	State        *state.State
+	*state.State
+
+	index        *index.Index
 	matches      map[uuid.UUID]*Match
 	factories    map[string]func() Core
 	matchesMutex sync.RWMutex
@@ -27,50 +30,66 @@ type Manager struct {
 func NewManager(state *state.State) *Manager {
 	return &Manager{
 		State:     state,
+		index:     index.New(),
 		matches:   make(map[uuid.UUID]*Match),
 		factories: make(map[string]func() Core),
 	}
 }
 
-func (m *Manager) Accept(conn *knet.Connection) {
-	conn.Tcp.SetReadDeadline(time.Now().Add(1 * time.Second))
-	data, disconnected, err := knet.ReadPacket(conn.Tcp)
-	if disconnected || err != nil {
-		conn.Close()
-		return
-	}
-	conn.Tcp.SetReadDeadline(time.Time{})
+func (m *Manager) Search(max, ratio uint32, query []byte) ([]uuid.UUID, error) {
+	max = util.Clamp(max, 1, 100)
+	result := make([]uuid.UUID, 0, max)
 
-	match, user, meta, err := m.DecodeInitialPacket(data)
-	if match == nil {
-		conn.WritePacketTCP(knet.OCMatchJoinFail, []byte(err.Error()), user.Cipher())
-		conn.Close()
-		return
+	if len(query) == 0 {
+		m.matchesMutex.Lock()
+		for id := range m.matches {
+			result = append(result, id)
+		}
+		m.matchesMutex.Unlock()
+		return result, nil
 	}
 
-	go conn.CollectPackets(m.State, user.Cipher())
+	buffer := Buffer{}
 
-	match.ConnectUser(user, conn, meta)
+	var parser index.Parser
+
+	fields, i, err := parser.Parse(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse query:%d: %s", i, err)
+	}
+
+	m.index.Search(&buffer, fields...)
+
+	for id, count := range buffer {
+		if count >= ratio {
+			result = append(result, id)
+		}
+		if uint32(len(result)) >= max {
+			break
+		}
+	}
+
+	return result, nil
 }
 
-func (m *Manager) DecodeInitialPacket(data []byte) (*Match, *state.User, []byte, error) {
-	packet, err := knet.DecodeEncryptedClientPacket(m.State, data, false)
-	if err != nil {
-		return nil, nil, nil, util.WrapErr("failed to decrypt packet", err)
-	}
+func (m *Manager) Accept(conn *knet.Connection, packet knet.ClientPacket) {
+	reader := util.NewReader(packet.Data)
 
-	var matchID uuid.UUID
-	if len(packet.Data) < len(matchID) {
-		return nil, nil, nil, ErrMissingMatchID
+	matchID, ok := reader.UUID()
+	if !ok {
+		m.Debug("Packet from %s is missing match id.", conn.Tcp.RemoteAddr())
+		return
 	}
-	copy(matchID[:], packet.Data[:])
 
 	match := m.GetMatch(matchID)
 	if match == nil {
-		return nil, nil, nil, ErrMatchNotFound
+		conn.WritePacketTCP(knet.OCMatchJoinFail, []byte("Match with this id does not exist."))
+		return
 	}
 
-	return match, packet.User, packet.Data[len(matchID):], nil
+	go conn.CollectPackets(m.State)
+
+	match.ConnectUser(packet.User, conn, reader.Rest())
 }
 
 func (m *Manager) GetMatch(id uuid.UUID) *Match {
@@ -82,7 +101,7 @@ func (m *Manager) GetMatch(id uuid.UUID) *Match {
 
 func (m *Manager) AddMatch(match *Match) {
 	m.matchesMutex.Lock()
-	m.matches[match.Id] = match
+	m.matches[match.id] = match
 	m.matchesMutex.Unlock()
 
 	go match.Run()
@@ -90,6 +109,7 @@ func (m *Manager) AddMatch(match *Match) {
 
 func (m *Manager) RegisterCore(id string, factory func() Core) {
 	m.check()
+	m.Info("Registered match core under %s.", id)
 	m.factories[id] = factory
 }
 
@@ -109,4 +129,10 @@ func (m *Manager) Finish() {
 
 func (m *Manager) Finished() bool {
 	return m.finished
+}
+
+type Buffer map[uuid.UUID]uint32
+
+func (b *Buffer) Add(id interface{}) {
+	(*b)[*id.(*uuid.UUID)]++
 }

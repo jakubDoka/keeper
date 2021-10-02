@@ -59,7 +59,8 @@ func (l *UDPListener) CollectPackets(state *state.State) {
 		val := l.connections[str]
 		l.connectionsMutex.Unlock()
 		if val == nil {
-			packet, err := DecodeEncryptedClientPacket(state, packet, true)
+			var cipher kcrypto.Cipher
+			packet, err := DecodeEncryptedClientPacket(state, packet, true, &cipher)
 			if err != nil {
 				state.Debug("Initial udp packet from %s is invalid: %s", str, err)
 				continue

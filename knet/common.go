@@ -4,7 +4,6 @@ import (
 	"crypto/aes"
 	"encoding/binary"
 	"errors"
-	"io"
 	"net"
 
 	"github.com/jakubDoka/keeper/state"
@@ -51,6 +50,9 @@ var (
 	ErrMissingTarget      = errors.New("packet is missing target")
 	ErrIDOrSessionInvalid = errors.New("user id or session is invalid")
 	ErrSessionInvalid     = errors.New("session is invalid")
+	ErrMissingUserID      = errors.New("packet is missing user id")
+	ErrMissingGen         = errors.New("packet is missing gen")
+	ErrMissingKey         = errors.New("there is no key for initial packet")
 )
 
 type ClientPacket struct {
@@ -82,32 +84,54 @@ func EncodePacketTCP(packetCode OpCode, packetData []byte, cipher *kcrypto.Ciphe
 		Uint32(uint32(packetCode)).
 		Rest(packetData)
 
-	cipher.Encrypt(writer.Buffer()[4:], true) // skip size
-
-	return writer.Buffer()[:calc.Value()] // reveal the padding
+	cipher.EncryptTCP(writer.Buffer()[4:]) // skip size
+	return writer.Buffer()[:calc.Value()]  // reveal the padding
 }
 
 func EncodePacketUDP(packetCode OpCode, packetData []byte, cipher *kcrypto.Cipher) []byte {
 	var calc util.Calculator
-	writer := calc.Uint32().Rest(packetData).ToWriter()
+	writer := calc.
+		Uint32().
+		Rest(packetData).
+		Pad(aes.BlockSize).
+		Uint32().
+		ToWriter()
 	writer.
+		Uint32(0).
 		Uint32(uint32(packetCode)).
 		Rest(packetData)
 
-	return cipher.Encrypt(writer.Buffer(), false)
+	_, gen := cipher.EncryptUDP(writer.Buffer()[4:])
+	binary.BigEndian.PutUint32(writer.Buffer(), gen)
+	return writer.Buffer()[:calc.Value()]
 }
 
-func DecodeEncryptedClientPacket(state *state.State, data []byte, udp bool) (ClientPacket, error) {
-	var id uuid.UUID
-	copy(id[:], data)
+func DecodeEncryptedClientPacket(state *state.State, data []byte, udp bool, cipher *kcrypto.Cipher) (ClientPacket, error) {
+	reader := util.NewReader(data)
 
-	user := state.GetUser(uuid.Nil, id)
-
-	if user == nil {
-		return ClientPacket{}, ErrIDOrSessionInvalid
+	id, ok := reader.UUID()
+	if !ok {
+		return ClientPacket{}, ErrMissingUserID
 	}
 
-	data, err := user.Cipher().Decrypt(data[len(id):], !udp)
+	if cipher.IsNil() {
+		key, ok := state.GetKey(id)
+		if !ok {
+			return ClientPacket{}, ErrMissingKey
+		}
+		*cipher = kcrypto.NewCipherWithKey(key)
+	}
+
+	var err error
+	if udp {
+		gen, ok := reader.Uint32()
+		if !ok {
+			return ClientPacket{}, ErrMissingGen
+		}
+		data, err = cipher.DecryptUDP(reader.Rest(), gen)
+	} else {
+		data, err = cipher.DecryptTCP(reader.Rest())
+	}
 	if err != nil {
 		return ClientPacket{}, util.WrapErr("failed to decrypt packet", err)
 	}
@@ -117,8 +141,14 @@ func DecodeEncryptedClientPacket(state *state.State, data []byte, udp bool) (Cli
 		return ClientPacket{}, util.WrapErr("failed to decode packet", err)
 	}
 
+	user := state.GetUser(uuid.Nil, id)
+
+	if user == nil {
+		return ClientPacket{}, ErrIDOrSessionInvalid
+	}
+
 	if packet.Session != user.Session() {
-		return ClientPacket{}, ErrSessionInvalid
+		return packet, ErrSessionInvalid
 	}
 
 	packet.User = user
@@ -162,14 +192,11 @@ func DecodeClientPacket(data []byte, udp bool) (ClientPacket, error) {
 	}, nil
 }
 
-func ReadPacket(conn net.Conn) ([]byte, bool, error) {
+func ReadPacket(conn net.Conn) ([]byte, error) {
 	var packetSize [4]byte
 	_, err := conn.Read(packetSize[:])
 	if err != nil {
-		if err == io.EOF {
-			return nil, true, nil
-		}
-		return nil, false, util.WrapErr("failed to read packet size", err)
+		return nil, util.WrapErr("failed to read packet size", err)
 	}
 
 	size := binary.BigEndian.Uint32(packetSize[:])
@@ -177,11 +204,8 @@ func ReadPacket(conn net.Conn) ([]byte, bool, error) {
 
 	_, err = conn.Read(buffer)
 	if err != nil {
-		if err == io.EOF {
-			return nil, true, nil
-		}
-		return nil, false, util.WrapErr("failed to read packet content", err)
+		return nil, util.WrapErr("failed to read packet content", err)
 	}
 
-	return buffer, false, nil
+	return buffer, nil
 }

@@ -70,7 +70,7 @@ func TestParser(t *testing.T) {
 
 	for _, test := range tc {
 		t.Run(test.name, func(t *testing.T) {
-			result, progress, err := parser.ParseItem([]byte(test.code))
+			result, progress, err := parser.Parse([]byte(test.code))
 			if err != test.err {
 				t.Errorf("expected error %v, got %v", test.err, err)
 				if progress != test.progress {

@@ -41,8 +41,19 @@ func CheckSysCallError(err error, value string) bool {
 	switch e := err.(type) {
 	case *net.OpError:
 		if e, ok := e.Err.(*os.SyscallError); ok {
+			fmt.Println(e.Syscall)
 			return e.Syscall == value
 		}
 	}
 	return false
+}
+
+func Clamp(v, min, max uint32) uint32 {
+	if v > max {
+		return max
+	}
+	if v < min {
+		return min
+	}
+	return v
 }

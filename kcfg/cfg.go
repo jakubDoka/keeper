@@ -1,4 +1,4 @@
-package cfg
+package kcfg
 
 import (
 	"fmt"
@@ -28,7 +28,7 @@ func GenerateConfig() error {
 		return err
 	}
 
-	err = ioutil.WriteFile("config.yaml", bytes, 0644)
+	err = ioutil.WriteFile("kconfig.yaml", bytes, 0644)
 	if err != nil {
 		return err
 	}
@@ -38,8 +38,9 @@ func GenerateConfig() error {
 
 var DefaultConfig = Config{
 	Net: Net{
-		Host: "127.0.0.1",
-		Port: 8080,
+		Scheme: "http",
+		Host:   "127.0.0.1",
+		Port:   8080,
 	},
 	Db: DB{
 		Driver: "postgres",
@@ -70,8 +71,9 @@ type Config struct {
 }
 
 type Net struct {
-	Host string `yaml:"host"`
-	Port uint16 `yaml:"port"`
+	Scheme string `yaml:"scheme"`
+	Host   string `yaml:"host"`
+	Port   uint16 `yaml:"port"`
 
 	CertFile string `yaml:"cert_file"`
 	KeyFile  string `yaml:"key_file"`

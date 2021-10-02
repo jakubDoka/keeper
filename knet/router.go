@@ -13,14 +13,16 @@ import (
 type RpcHandlerFunc = func(state *state.State, user *state.User, w http.ResponseWriter, re *http.Request) error
 
 type Router struct {
+	*http.Server
+	*state.State
+
 	Listener    *Listener
-	State       *state.State
 	Mux         *http.ServeMux
 	rpcHandlers map[string][]RpcHandlerFunc
 }
 
-func NewRouter(state *state.State, acceptor Acceptor) (*Router, error) {
-	listener, err := NewListener(state, state.Config().Net.GetConnectionString(), acceptor)
+func NewRouter(state *state.State) (*Router, error) {
+	listener, err := NewListener(state, state.Net.GetConnectionString())
 	if err != nil {
 		return nil, util.WrapErr("failed to create new listener", err)
 	}
@@ -32,6 +34,7 @@ func NewRouter(state *state.State, acceptor Acceptor) (*Router, error) {
 		Mux:         mux,
 		State:       state,
 		rpcHandlers: make(map[string][]RpcHandlerFunc),
+		Server:      &http.Server{},
 	}
 
 	mux.HandleFunc("/rpc", r.RpcHandler)
@@ -40,16 +43,19 @@ func NewRouter(state *state.State, acceptor Acceptor) (*Router, error) {
 }
 
 func (r *Router) RegisterRpc(id string, handler ...RpcHandlerFunc) {
-	r.State.Info("Registered rpc: %s", id)
+	r.Info("Registered rpc: %s", id)
 	r.rpcHandlers[id] = handler
 }
 
-func (r *Router) Serve(certFile, keyFile string) error {
+func (r *Router) Serve(addr, certFile, keyFile string) error {
+	r.Server.Addr = addr
+	r.Server.Handler = r.Mux
+
 	if certFile != "" && keyFile != "" {
-		return http.ListenAndServeTLS(r.State.Config().Net.GetHttpConnectionString(), certFile, keyFile, r.Mux)
+		return r.ListenAndServeTLS(certFile, keyFile)
 	}
-	r.State.Warn("Rpc server is running without ssl.")
-	return http.ListenAndServe(r.State.Config().Net.GetHttpConnectionString(), r.Mux)
+	r.Warn("HTTP server is running without ssl.")
+	return r.ListenAndServe()
 }
 
 func (r *Router) RpcHandler(w http.ResponseWriter, re *http.Request) {
@@ -70,9 +76,9 @@ func (r *Router) RpcHandler(w http.ResponseWriter, re *http.Request) {
 	var session uuid.UUID
 	hex.Decode(session[:], rawSession[:])
 
-	user := r.State.GetUser(session, uuid.Nil)
+	user := r.GetUser(session, uuid.Nil)
 
-	r.State.Debug("Rpc call: id: %s session: %s", id, session)
+	r.Debug("Rpc call: id: %s session: %s", id, session)
 
 	for _, handler := range handlers {
 		err := handler(r.State, user, w, re)

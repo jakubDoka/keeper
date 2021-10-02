@@ -40,7 +40,7 @@ type Parser struct {
 	result             []Field
 }
 
-func (p *Parser) ParseItem(data []byte) ([]Field, int, error) {
+func (p *Parser) Parse(data []byte) ([]Field, int, error) {
 	p.data = data
 	p.progress = 0
 	p.previous = 0

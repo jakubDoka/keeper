@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jakubDoka/keeper/cfg"
+	"github.com/jakubDoka/keeper/kcfg"
 	"github.com/jakubDoka/keeper/klog"
 	"github.com/jakubDoka/keeper/util"
 	"github.com/jakubDoka/keeper/util/kcrypto"
@@ -14,7 +14,7 @@ import (
 
 // State holds application state. All allowed operations on state are thread safe.
 type State struct {
-	cfg cfg.Config
+	*kcfg.Config
 	*sql.DB
 	*klog.Logger
 	*util.Prepared
@@ -22,19 +22,50 @@ type State struct {
 	sessions     map[uuid.UUID]*User
 	users        map[uuid.UUID]*User
 	sessionMutex sync.RWMutex
+
+	keys     map[uuid.UUID]kcrypto.Key
+	keyMutex sync.RWMutex
 }
 
 // New creates new state.
-func New(db *sql.DB, cfg cfg.Config, log *klog.Logger) *State {
+func New(db *sql.DB, cfg *kcfg.Config, log *klog.Logger) *State {
 	state := &State{
-		cfg:      cfg,
+		Config:   cfg,
 		DB:       db,
 		Logger:   log,
 		Prepared: util.NewPrepared(),
 		sessions: make(map[uuid.UUID]*User),
 		users:    make(map[uuid.UUID]*User),
+		keys:     make(map[uuid.UUID]kcrypto.Key),
 	}
 	return state
+}
+
+func (s *State) Prepare(id, content string) error {
+	return s.Prepared.Prepare(s.DB, id, content)
+}
+
+func (s *State) CreateKey(userID uuid.UUID) kcrypto.Key {
+	key := kcrypto.NewKey()
+
+	s.keyMutex.Lock()
+	s.keys[userID] = key
+	s.keyMutex.Unlock()
+
+	return key
+}
+
+func (s *State) GetKey(userID uuid.UUID) (key kcrypto.Key, ok bool) {
+	s.keyMutex.RLock()
+	key, ok = s.keys[userID]
+	s.keyMutex.RUnlock()
+	return
+}
+
+func (s *State) DeleteKey(userID uuid.UUID) {
+	s.keyMutex.Lock()
+	delete(s.keys, userID)
+	s.keyMutex.Unlock()
 }
 
 // AddUser adds user to state so it is accessable. Session is access point that you should
@@ -72,15 +103,13 @@ func (s *State) GetUser(session, id uuid.UUID) *User {
 		delete(s.sessions, user.session)
 		delete(s.users, user.id)
 		s.sessionMutex.Unlock()
+
+		s.DeleteKey(user.id)
+
 		return nil
 	}
 
 	return user
-}
-
-// Config returns the global config.
-func (s *State) Config() cfg.Config {
-	return s.cfg
 }
 
 // User holds minimal data about user that is required by system.
@@ -89,7 +118,6 @@ type User struct {
 	id, session uuid.UUID
 	expiration  time.Time
 	ip          string
-	cipher      kcrypto.Cipher
 }
 
 // NewUser constructs a user with given livetime. User is also give a cipher
@@ -100,7 +128,6 @@ func NewUser(id, session uuid.UUID, duration time.Duration, IP string) *User {
 		session:    session,
 		expiration: time.Now().Add(duration),
 		ip:         IP,
-		cipher:     kcrypto.NewCipher(),
 	}
 }
 
@@ -114,11 +141,6 @@ func (u *User) IP() string {
 	return u.ip
 }
 
-// Cipher returns user cipher.
-func (u *User) Cipher() *kcrypto.Cipher {
-	return &u.cipher
-}
-
 // Session returns user session.
 func (u *User) Session() uuid.UUID {
 	return u.session
@@ -126,4 +148,8 @@ func (u *User) Session() uuid.UUID {
 
 func (u *User) Expired() bool {
 	return u.expiration.Before(time.Now())
+}
+
+func (u *User) Expiration() time.Time {
+	return u.expiration
 }
